@@ -14,12 +14,14 @@ parser.add_argument("-c", "--copy-steps", type=int, default=10000,
     help="number of training steps between copies of online DQN to target DQN")
 parser.add_argument("-r", "--render", action="store_true", default=False,
     help="render the game during training or testing")
-parser.add_argument("-p", "--path", default="my_dqn.ckpt",
+parser.add_argument("-p", "--path", default="",
     help="path of the checkpoint file")
 parser.add_argument("-t", "--test", action="store_true", default=False,
     help="test (no learning and minimal epsilon)")
 parser.add_argument("-v", "--verbosity", action="count", default=0,
     help="increase output verbosity")
+parser.add_argument("-g", "--game", default="MsPacman-v0",
+    help="game id in gym")
 args = parser.parse_args()
 
 from collections import deque
@@ -27,9 +29,11 @@ import gym
 import numpy as np
 import os
 import tensorflow as tf
+import time
 
-env = gym.make("MsPacman-v0")
+env = gym.make(args.game)
 done = True  # env needs to be reset
+model_save_path = os.path.join(os.getcwd(), args.game, 'my_dqn.ckpt') if not args.path else args.path
 
 # First let's build the two DQNs (online & target)
 input_height = 88
@@ -92,13 +96,16 @@ with tf.variable_scope("train"):
     linear_error = 2 * (error - clipped_error)
     loss = tf.reduce_mean(tf.square(clipped_error) + linear_error)
 
+    global_time = tf.Variable(0, trainable=False, name='global_time')
+    global_episode = tf.Variable(0, trainable=False, name='global_episode')
+    inc_global_episode = tf.assign_add(global_episode, 1, name='inc_global_episode')
     global_step = tf.Variable(0, trainable=False, name='global_step')
     optimizer = tf.train.MomentumOptimizer(
         learning_rate, momentum, use_nesterov=True)
     training_op = optimizer.minimize(loss, global_step=global_step)
 
 init = tf.global_variables_initializer()
-saver = tf.train.Saver()
+saver = tf.train.Saver(keep_checkpoint_every_n_hours=1)
 
 # Let's implement a simple replay memory
 replay_memory_size = 20000
@@ -120,8 +127,11 @@ eps_min = 0.1
 eps_max = 1.0 if not args.test else eps_min
 eps_decay_steps = args.number_steps // 2
 
+def epsilon_calc(step):
+    return max(eps_min, eps_max - (eps_max - eps_min) * step / eps_decay_steps)
+
 def epsilon_greedy(q_values, step):
-    epsilon = max(eps_min, eps_max - (eps_max-eps_min) * step/eps_decay_steps)
+    epsilon = epsilon_calc(step)
     if np.random.rand() < epsilon:
         return np.random.randint(n_outputs) # random action
     else:
@@ -151,13 +161,22 @@ game_length = 0
 total_max_q = 0
 mean_max_q = 0.0
 
+initial_time = time.clock()  # remember time for statistics
+reward_sum = 0
+stat_episodes = 0
+stat_reward = 0
+stat_steps = 0
+stat_time = 0
+
 with tf.Session() as sess:
-    if os.path.isfile(args.path + ".index"):
-        saver.restore(sess, args.path)
+    if os.path.isfile(model_save_path + ".index"):
+        print("Restoring model %s." % model_save_path)
+        saver.restore(sess, model_save_path)
     else:
         init.run()
         copy_online_to_target.run()
     while True:
+        episode = global_episode.eval()
         step = global_step.eval()
         if step >= args.number_steps:
             break
@@ -188,16 +207,23 @@ with tf.Session() as sess:
         replay_memory.append((state, action, reward, next_state, 1.0 - done))
         state = next_state
 
-        if args.test:
-            continue
-
         # Compute statistics for tracking progress (not shown in the book)
         total_max_q += q_values.max()
         game_length += 1
+        reward_sum += reward
+        stat_steps += 1
         if done:
+            episode = sess.run(inc_global_episode)
             mean_max_q = total_max_q / game_length
             total_max_q = 0.0
             game_length = 0
+            stat_episodes += 1
+            stat_reward += reward_sum
+            print('resetting env. episode%d reward %f.' % (episode, reward_sum))
+            reward_sum = 0
+
+        if args.test:
+            continue
 
         if iteration < training_start or iteration % args.learn_iterations != 0:
             continue # only train after warmup period and at regular intervals
@@ -216,8 +242,23 @@ with tf.Session() as sess:
 
         # Regularly copy the online DQN to the target DQN
         if step % args.copy_steps == 0:
+            print("Copy online DQN to target DQN.")
             copy_online_to_target.run()
 
         # And save regularly
         if step % args.save_steps == 0:
-            saver.save(sess, args.path)
+            print("Saving model.")
+            saver.save(sess, model_save_path)
+
+        # And print statistics regularly (with save frequency)
+        if step % args.save_steps == 0:
+            stat_time = time.clock() - initial_time
+            inc_global_time = tf.assign(global_time, global_time.eval() + stat_time)
+            total_time = sess.run(inc_global_time)
+            steps_per_second = stat_steps / stat_time
+            running_reward = 1.0 * stat_reward / stat_episodes
+            print("steps per second: %d. running reward mean: %f." % (steps_per_second, running_reward))
+            print("total model steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time/60, epsilon_calc(step)))
+            stat_episodes = 0
+            stat_reward = 0
+            stat_steps = 0
