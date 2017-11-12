@@ -161,12 +161,11 @@ game_length = 0
 total_max_q = 0
 mean_max_q = 0.0
 
-initial_time = time.clock()  # remember time for statistics
 reward_sum = 0
 stat_episodes = 0
 stat_reward = 0
 stat_steps = 0
-stat_time = 0
+prev_time = time.clock()
 
 with tf.Session() as sess:
     if os.path.isfile(model_save_path + ".index"):
@@ -252,7 +251,8 @@ with tf.Session() as sess:
 
         # And print statistics regularly (with save frequency)
         if step % args.save_steps == 0:
-            stat_time = time.clock() - initial_time
+            stat_time = time.clock() - prev_time
+            prev_time = time.clock()
             inc_global_time = tf.assign(global_time, global_time.eval() + stat_time)
             total_time = sess.run(inc_global_time)
             steps_per_second = stat_steps / stat_time
