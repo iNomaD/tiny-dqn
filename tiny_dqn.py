@@ -269,4 +269,4 @@ with tf.Session() as sess:
             sess.run(tf.assign(global_step, step))
             sess.run(tf.assign(global_time, total_time))
             print("Saving model.")
-            saver.save(sess, model_save_path, global_step=global_step)
+            saver.save(sess, model_save_path)
