@@ -4,7 +4,7 @@ from __future__ import division, print_function, unicode_literals
 import argparse
 parser = argparse.ArgumentParser(
     description="Train a DQN net to play MsMacman.")
-parser.add_argument("-n", "--number-steps", type=int, default=4000000,
+parser.add_argument("-n", "--number-steps", type=int, default=1000000,
     help="total number of training steps")
 parser.add_argument("-l", "--learn-iterations", type=int, default=4,
     help="number of game iterations between each training step")
@@ -96,16 +96,15 @@ with tf.variable_scope("train"):
     linear_error = 2 * (error - clipped_error)
     loss = tf.reduce_mean(tf.square(clipped_error) + linear_error)
 
-    global_time = tf.Variable(0, trainable=False, name='global_time')
-    global_episode = tf.Variable(0, trainable=False, name='global_episode')
-    inc_global_episode = tf.assign_add(global_episode, 1, name='inc_global_episode')
+    optimizer = tf.train.MomentumOptimizer(learning_rate, momentum, use_nesterov=True)
+    training_op = optimizer.minimize(loss)
+
     global_step = tf.Variable(0, trainable=False, name='global_step')
-    optimizer = tf.train.MomentumOptimizer(
-        learning_rate, momentum, use_nesterov=True)
-    training_op = optimizer.minimize(loss, global_step=global_step)
+    global_episode = tf.Variable(0, trainable=False, name='global_episode')
+    global_time = tf.Variable(0, trainable=False, name='global_time')
 
 init = tf.global_variables_initializer()
-saver = tf.train.Saver(keep_checkpoint_every_n_hours=1)
+saver = tf.train.Saver()
 
 # Let's implement a simple replay memory
 replay_memory_size = 20000
@@ -126,16 +125,10 @@ def sample_memories(batch_size):
 eps_min = 0.1
 eps_max = 1.0 if not args.test else eps_min
 eps_decay_steps = args.number_steps // 2
+eps_decay_rate = (eps_max - eps_min) / eps_decay_steps  # constant
 
 def epsilon_calc(step):
-    return max(eps_min, eps_max - (eps_max - eps_min) * step / eps_decay_steps)
-
-def epsilon_greedy(q_values, step):
-    epsilon = epsilon_calc(step)
-    if np.random.rand() < epsilon:
-        return np.random.randint(n_outputs) # random action
-    else:
-        return np.argmax(q_values) # optimal action
+    return max(eps_min, eps_max - eps_decay_rate * step )
 
 # We need to preprocess the images to speed up training
 mspacman_color = np.array([210, 164, 74]).mean()
@@ -150,10 +143,10 @@ def preprocess_observation(obs):
 # TensorFlow - Execution phase
 training_start = 10000  # start training after 10,000 game iterations
 discount_rate = 0.99
-skip_start = 90  # Skip the start of every game (it's just waiting time).
+skip_start = 30  # Skip the start of every game (it's just waiting time).
 batch_size = 50
 iteration = 0  # game iterations
-done = True # env needs to be reset
+state = None
 
 # We will keep track of the max Q-Value over time and compute the mean per game
 loss_val = np.infty
@@ -164,8 +157,8 @@ mean_max_q = 0.0
 reward_sum = 0
 stat_episodes = 0
 stat_reward = 0
-stat_steps = 0
-prev_time = time.clock()
+stat_iterations = 0
+stat_prev_time = time.clock()
 
 with tf.Session() as sess:
     if os.path.isfile(model_save_path + ".index"):
@@ -174,9 +167,13 @@ with tf.Session() as sess:
     else:
         init.run()
         copy_online_to_target.run()
+
+    # prepare variables from model
+    step = global_step.eval()
+    episode = global_episode.eval()
+    total_time = global_time.eval()
+
     while True:
-        episode = global_episode.eval()
-        step = global_step.eval()
         if step >= args.number_steps:
             break
         iteration += 1
@@ -194,26 +191,33 @@ with tf.Session() as sess:
         if args.render:
             env.render()
 
-        # Online DQN evaluates what to do
-        q_values = online_q_values.eval(feed_dict={X_state: [state]})
-        action = epsilon_greedy(q_values, step)
+        # Epsilon greedy strategy
+        epsilon = epsilon_calc(step)
+        if np.random.rand() >= epsilon and state is not None:
+            # Online DQN evaluates what to do
+            q_values = online_q_values.eval(feed_dict={X_state: [state]})
+            action = np.argmax(q_values)  # optimal action
+
+            # Compute statistics for tracking progress (not shown in the book)
+            total_max_q += q_values.max()
+            game_length += 1
+        else:
+            action = np.random.randint(n_outputs)  # random action
 
         # Online DQN plays
-        obs, reward, done, info = env.step(action)
+        obs, reward, done, _ = env.step(action)
         next_state = preprocess_observation(obs)
 
         # Let's memorize what happened
         replay_memory.append((state, action, reward, next_state, 1.0 - done))
         state = next_state
 
-        # Compute statistics for tracking progress (not shown in the book)
-        total_max_q += q_values.max()
-        game_length += 1
+        # Compute further statistics for tracking progress (not shown in the book)
         reward_sum += reward
-        stat_steps += 1
+        stat_iterations += 1
         if done:
-            episode = sess.run(inc_global_episode)
-            mean_max_q = total_max_q / game_length
+            episode += 1
+            mean_max_q = total_max_q / game_length if game_length != 0 else 0
             total_max_q = 0.0
             game_length = 0
             stat_episodes += 1
@@ -226,7 +230,7 @@ with tf.Session() as sess:
 
         if iteration < training_start or iteration % args.learn_iterations != 0:
             continue # only train after warmup period and at regular intervals
-        
+
         # Sample memories and use the target DQN to produce the target Q-Value
         X_state_val, X_action_val, rewards, X_next_state_val, continues = (
             sample_memories(batch_size))
@@ -235,30 +239,34 @@ with tf.Session() as sess:
         max_next_q_values = np.max(next_q_values, axis=1, keepdims=True)
         y_val = rewards + continues * discount_rate * max_next_q_values
 
-        # Train the online DQN
+        # Train the online DQN and increase step counter
         _, loss_val = sess.run([training_op, loss], feed_dict={
             X_state: X_state_val, X_action: X_action_val, y: y_val})
+        step += 1
 
         # Regularly copy the online DQN to the target DQN
         if step % args.copy_steps == 0:
             print("Copy online DQN to target DQN.")
             copy_online_to_target.run()
 
-        # And save regularly
-        if step % args.save_steps == 0:
-            print("Saving model.")
-            saver.save(sess, model_save_path)
-
         # And print statistics regularly (with save frequency)
         if step % args.save_steps == 0:
-            stat_time = time.clock() - prev_time
-            prev_time = time.clock()
-            inc_global_time = tf.assign(global_time, global_time.eval() + stat_time)
-            total_time = sess.run(inc_global_time)
-            steps_per_second = stat_steps / stat_time
+            stat_time = time.clock() - stat_prev_time
+            stat_prev_time = time.clock()
+            total_time += stat_time
+            iter_per_second = stat_iterations / stat_time
             running_reward = 1.0 * stat_reward / stat_episodes
-            print("steps per second: %d. running reward mean: %f." % (steps_per_second, running_reward))
-            print("total model steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time/60, epsilon_calc(step)))
+            print("iterations per second: %d. running reward mean: %f." % (iter_per_second, running_reward))
+            print("total train steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time/60, epsilon_calc(step)))
             stat_episodes = 0
             stat_reward = 0
-            stat_steps = 0
+            stat_iterations = 0
+
+        # And save regularly
+        if step % args.save_steps == 0:
+            # prepare variables first
+            sess.run(tf.assign(global_episode, episode))
+            sess.run(tf.assign(global_step, step))
+            sess.run(tf.assign(global_time, total_time))
+            print("Saving model.")
+            saver.save(sess, model_save_path, global_step=global_step)
