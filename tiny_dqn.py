@@ -35,8 +35,19 @@ env = gym.make(args.game)
 done = True  # env needs to be reset
 model_save_path = os.path.join(os.getcwd(), args.game, 'my_dqn.ckpt') if not args.path else args.path
 
+# Define actions for games (gym-0.9.4)
+if args.game == "Pong-v0":
+    n_outputs = 3
+    action_space = [0, 2, 5]
+else:
+    n_outputs = env.action_space.n  # 9 discrete actions are available
+    action_space = [i for i in range(0, n_outputs)]
+
+def pick_action(action_number):
+    return action_space[action_number]
+
 # First let's build the two DQNs (online & target)
-input_height = 88
+input_height = 80
 input_width = 80
 input_channels = 1
 conv_n_maps = [32, 64, 64]
@@ -47,7 +58,6 @@ conv_activation = [tf.nn.relu] * 3
 n_hidden_in = 64 * 11 * 10  # conv3 has 64 maps of 11x10 each
 n_hidden = 512
 hidden_activation = tf.nn.relu
-n_outputs = env.action_space.n  # 9 discrete actions are available
 initializer = tf.contrib.layers.variance_scaling_initializer()
 
 def q_network(X_state, name):
@@ -132,13 +142,32 @@ def epsilon_calc(step):
 
 # We need to preprocess the images to speed up training
 mspacman_color = np.array([210, 164, 74]).mean()
+pong_bg_color = np.array([144, 72, 17]).mean()
+breakout_wall_color = np.array([142, 142, 142]).mean()
 
 def preprocess_observation(obs):
-    img = obs[1:176:2, ::2] # crop and downsize
-    img = img.mean(axis=2) # to greyscale
-    img[img==mspacman_color] = 0 # Improve contrast
-    img = (img - 128) / 128 - 1 # normalize from -1. to 1.
-    return img.reshape(88, 80, 1)
+    # crop and downsize (from 210x160 to 80x80x3)
+    # to greyscale (to 80x80)
+    # Improve contrast
+    if args.game == "MsPacman-v0":
+        img = obs[7:167:2, ::2]
+        img = img.mean(axis=2)
+        img[img == mspacman_color] = 0
+    elif args.game == "Pong-v0":
+        img = obs[35:195:2, ::2]
+        img = img.mean(axis=2)
+        img[img == pong_bg_color] = 0
+    elif args.game == "Breakout-v0":
+        img = obs[35:195:2, ::2]
+        img = img.mean(axis=2)
+        img[img == breakout_wall_color] = 25
+    else:  # others
+        img = obs[35:195:2, ::2]  # guess?
+        img = img.mean(axis=2)
+    #from scipy.misc import toimage
+    #toimage(img).show()
+    img = (img - 128) / 128  # normalize from -1. to 1.
+    return img.reshape(80, 80, 1) # to 80x80x1
 
 # TensorFlow - Execution phase
 training_start = 10000  # start training after 10,000 game iterations
@@ -185,7 +214,7 @@ with tf.Session() as sess:
         if done: # game over, start again
             obs = env.reset()
             for skip in range(skip_start): # skip the start of each game
-                obs, reward, done, info = env.step(0)
+                obs, reward, done, info = env.step(pick_action(0))
             state = preprocess_observation(obs)
 
         if args.render:
@@ -193,7 +222,7 @@ with tf.Session() as sess:
 
         # Epsilon greedy strategy
         epsilon = epsilon_calc(step)
-        if np.random.rand() >= epsilon and state is not None:
+        if np.random.rand() >= epsilon:
             # Online DQN evaluates what to do
             q_values = online_q_values.eval(feed_dict={X_state: [state]})
             action = np.argmax(q_values)  # optimal action
@@ -205,7 +234,7 @@ with tf.Session() as sess:
             action = np.random.randint(n_outputs)  # random action
 
         # Online DQN plays
-        obs, reward, done, _ = env.step(action)
+        obs, reward, done, _ = env.step(pick_action(action))
         next_state = preprocess_observation(obs)
 
         # Let's memorize what happened
