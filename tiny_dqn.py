@@ -37,11 +37,13 @@ model_save_path = os.path.join(os.getcwd(), args.game, 'my_dqn.ckpt') if not arg
 
 # Define actions for games (gym-0.9.4)
 if args.game == "Pong-v0":
-    n_outputs = 3
-    action_space = [0, 2, 5]
+    action_space = [0, 2, 5] # [NONE, UP, DOWN]
+elif args.game == "Breakout-v0":
+	action_space = [1, 2, 3] # [FIRE, RIGHT, LEFT]
 else:
-    n_outputs = env.action_space.n  # 9 discrete actions are available
-    action_space = [i for i in range(0, n_outputs)]
+    # 9 discrete actions are available
+    action_space = [i for i in range(0, env.action_space.n)]
+n_outputs = len(action_space)
 
 def pick_action(action_number):
     return action_space[action_number]
