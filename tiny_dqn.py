@@ -4,8 +4,8 @@ from __future__ import division, print_function, unicode_literals
 import argparse
 parser = argparse.ArgumentParser(
     description="Train a DQN net to play MsMacman.")
-parser.add_argument("-n", "--number-steps", type=int, default=1000000,
-    help="total number of training steps")
+parser.add_argument("-n", "--number-steps", type=int, default=500000,
+    help="number of training steps for epsilon decay")
 parser.add_argument("-l", "--learn-iterations", type=int, default=4,
     help="number of game iterations between each training step")
 parser.add_argument("-s", "--save-steps", type=int, default=1000,
@@ -16,6 +16,8 @@ parser.add_argument("-r", "--render", action="store_true", default=False,
     help="render the game during training or testing")
 parser.add_argument("-p", "--path", default="",
     help="path of the checkpoint file")
+parser.add_argument("-k", "--keep-intervals", nargs='+', type=int,
+    help="a list of intervals in minutes to keep checkpoints (e.g. -k 30 60 120 240 480")
 parser.add_argument("-t", "--test", action="store_true", default=False,
     help="test (no learning and minimal epsilon)")
 parser.add_argument("-v", "--verbosity", action="count", default=0,
@@ -30,16 +32,17 @@ import numpy as np
 import os
 import tensorflow as tf
 import time
+from threading import Timer
 
 env = gym.make(args.game)
 done = True  # env needs to be reset
-model_save_path = os.path.join(os.getcwd(), args.game, 'my_dqn.ckpt') if not args.path else args.path
+model_save_path = os.path.join(os.getcwd(), args.game) if not args.path else args.path
 
 # Define actions for games (gym-0.9.4)
 if args.game == "Pong-v0":
     action_space = [0, 2, 5] # [NONE, UP, DOWN]
 elif args.game == "Breakout-v0":
-	action_space = [1, 2, 3] # [FIRE, RIGHT, LEFT]
+    action_space = [1, 2, 3] # [FIRE, RIGHT, LEFT]
 else:
     # 9 discrete actions are available
     action_space = [i for i in range(0, env.action_space.n)]
@@ -136,11 +139,26 @@ def sample_memories(batch_size):
 # And on to the epsilon-greedy policy with decaying epsilon
 eps_min = 0.1
 eps_max = 1.0 if not args.test else eps_min
-eps_decay_steps = args.number_steps // 2
+eps_decay_steps = args.number_steps
 eps_decay_rate = (eps_max - eps_min) / eps_decay_steps  # constant
 
 def epsilon_calc(step):
     return max(eps_min, eps_max - eps_decay_rate * step )
+
+# keep saved model in separate folder
+keep_flag = False
+if(args.keep_intervals):
+    ki = args.keep_intervals
+    print("keep-intervals: ", ki)
+    delays = [ki[i] - ki[i - 1] for i in range(1, len(ki))]
+    print("delays ", delays)
+    def set_flag():
+        print("keep time")
+        global keep_flag
+        keep_flag = True
+        if delays:
+            Timer(delays.pop(0) * 60, set_flag).start()
+    Timer(ki[0] * 60, set_flag).start()
 
 # We need to preprocess the images to speed up training
 mspacman_color = np.array([210, 164, 74]).mean()
@@ -192,9 +210,10 @@ stat_iterations = 0
 stat_prev_time = time.clock()
 
 with tf.Session() as sess:
-    if os.path.isfile(model_save_path + ".index"):
-        print("Restoring model %s." % model_save_path)
-        saver.restore(sess, model_save_path)
+    ckpt_path = os.path.join(model_save_path, 'my_dqn.ckpt')
+    if os.path.isfile(ckpt_path + ".index"):
+        print("Restoring model %s." % ckpt_path)
+        saver.restore(sess, ckpt_path)
     else:
         init.run()
         copy_online_to_target.run()
@@ -203,10 +222,9 @@ with tf.Session() as sess:
     step = global_step.eval()
     episode = global_episode.eval()
     total_time = global_time.eval()
+    print("Starting with step=%d, episode=%d, total_time=%d" % (step, episode, total_time/60))
 
     while True:
-        if step >= args.number_steps:
-            break
         iteration += 1
         if args.verbosity > 0:
             print("\rIteration {}   Training step {}/{} ({:.1f})%   "
@@ -288,7 +306,7 @@ with tf.Session() as sess:
             iter_per_second = stat_iterations / stat_time
             running_reward = 1.0 * stat_reward / stat_episodes
             print("iterations per second: %d. running reward mean: %f." % (iter_per_second, running_reward))
-            print("total train steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time/60, epsilon_calc(step)))
+            print("total train steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time//60, epsilon_calc(step)))
             stat_episodes = 0
             stat_reward = 0
             stat_iterations = 0
@@ -300,4 +318,8 @@ with tf.Session() as sess:
             sess.run(tf.assign(global_step, step))
             sess.run(tf.assign(global_time, total_time))
             print("Saving model.")
-            saver.save(sess, model_save_path)
+            if keep_flag:
+                saver.save(sess, os.path.join(model_save_path, str(total_time//60)+'m', 'my_dqn.ckpt'))
+                keep_flag = False
+            else:
+                saver.save(sess, os.path.join(model_save_path, 'my_dqn.ckpt'))
