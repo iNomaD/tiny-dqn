@@ -261,6 +261,11 @@ with tf.Session() as sess:
         replay_memory.append((state, action, reward, next_state, 1.0 - done))
         state = next_state
 
+        # antistuck if game is too long
+        if game_length == args.save_steps:
+            done = True
+            reward = -1
+
         # Compute further statistics for tracking progress (not shown in the book)
         reward_sum += reward
         stat_iterations += 1
@@ -304,7 +309,7 @@ with tf.Session() as sess:
             stat_prev_time = time.clock()
             total_time += stat_time
             iter_per_second = stat_iterations / stat_time
-            running_reward = 1.0 * stat_reward / stat_episodes
+            running_reward = 1.0 * stat_reward / stat_episodes if stat_episodes != 0 else float('nan')
             print("iterations per second: %d. running reward mean: %f." % (iter_per_second, running_reward))
             print("total train steps: %d. total time (min.): %d. epsilon: %f" % (step, total_time//60, epsilon_calc(step)))
             stat_episodes = 0
