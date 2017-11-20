@@ -26,34 +26,22 @@ parser.add_argument("-g", "--game", default="MsPacman-v0",
     help="game id in gym")
 args = parser.parse_args()
 
-from collections import deque
-import gym
+import environment
 import numpy as np
 import os
 import tensorflow as tf
 import time
 from threading import Timer
+from collections import deque
 
-env = gym.make(args.game)
-done = True  # env needs to be reset
-model_save_path = os.path.join(os.getcwd(), args.game) if not args.path else args.path
-
-# Define actions for games (gym-0.9.4)
-if args.game == "Pong-v0":
-    action_space = [0, 2, 5] # [NONE, UP, DOWN]
-elif args.game == "Breakout-v0":
-    action_space = [1, 2, 3] # [FIRE, RIGHT, LEFT]
-else:
-    # 9 discrete actions are available
-    action_space = [i for i in range(0, env.action_space.n)]
-n_outputs = len(action_space)
-
-def pick_action(action_number):
-    return action_space[action_number]
-
-# First let's build the two DQNs (online & target)
+# Make environment
 input_height = 80
 input_width = 80
+env = environment.GymEnvironment(args.game, input_width, input_height)
+n_outputs = env.numActions()
+model_save_path = os.path.join(os.getcwd(), args.game) if not args.path else args.path
+
+# First let's build the two DQNs (online & target)
 input_channels = 1
 conv_n_maps = [32, 64, 64]
 conv_kernel_sizes = [(8,8), (4,4), (3,3)]
@@ -160,35 +148,6 @@ if(args.keep_intervals):
             Timer(delays.pop(0) * 60, set_flag).start()
     Timer(ki[0] * 60, set_flag).start()
 
-# We need to preprocess the images to speed up training
-mspacman_color = np.array([210, 164, 74]).mean()
-pong_bg_color = np.array([144, 72, 17]).mean()
-breakout_wall_color = np.array([142, 142, 142]).mean()
-
-def preprocess_observation(obs):
-    # crop and downsize (from 210x160 to 80x80x3)
-    # to greyscale (to 80x80)
-    # Improve contrast
-    if args.game == "MsPacman-v0":
-        img = obs[7:167:2, ::2]
-        img = img.mean(axis=2)
-        img[img == mspacman_color] = 0
-    elif args.game == "Pong-v0":
-        img = obs[35:195:2, ::2]
-        img = img.mean(axis=2)
-        img[img == pong_bg_color] = 0
-    elif args.game == "Breakout-v0":
-        img = obs[35:195:2, ::2]
-        img = img.mean(axis=2)
-        img[img == breakout_wall_color] = 25
-    else:  # others
-        img = obs[35:195:2, ::2]  # guess?
-        img = img.mean(axis=2)
-    #from scipy.misc import toimage
-    #toimage(img).show()
-    img = (img - 128) / 128  # normalize from -1. to 1.
-    return img.reshape(80, 80, 1) # to 80x80x1
-
 # TensorFlow - Execution phase
 training_start = 10000  # start training after 10,000 game iterations
 discount_rate = 0.99
@@ -196,6 +155,7 @@ skip_start = 30  # Skip the start of every game (it's just waiting time).
 batch_size = 50
 iteration = 0  # game iterations
 state = None
+done = True
 
 # We will keep track of the max Q-Value over time and compute the mean per game
 loss_val = np.infty
@@ -232,10 +192,10 @@ with tf.Session() as sess:
             iteration, step, args.number_steps, step * 100 / args.number_steps,
             loss_val, mean_max_q), end="")
         if done: # game over, start again
-            obs = env.reset()
+            env.restart()
             for skip in range(skip_start): # skip the start of each game
-                obs, reward, done, info = env.step(pick_action(0))
-            state = preprocess_observation(obs)
+                reward, done = env.act(0)
+            state = env.getScreen()
 
         if args.render:
             env.render()
@@ -254,17 +214,17 @@ with tf.Session() as sess:
             action = np.random.randint(n_outputs)  # random action
 
         # Online DQN plays
-        obs, reward, done, _ = env.step(pick_action(action))
-        next_state = preprocess_observation(obs)
-
-        # Let's memorize what happened
-        replay_memory.append((state, action, reward, next_state, 1.0 - done))
-        state = next_state
+        reward, done = env.act(action)
+        next_state = env.getScreen()
 
         # antistuck if game is too long
         if game_length == args.save_steps:
             done = True
             reward = -1
+
+        # Let's memorize what happened
+        replay_memory.append((state, action, reward, next_state, 1.0 - done))
+        state = next_state
 
         # Compute further statistics for tracking progress (not shown in the book)
         reward_sum += reward
