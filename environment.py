@@ -16,7 +16,7 @@ class GymEnvironment():
 
     # Define actions for games (gym-0.9.4 and ALE 0.5.1)
     if env_id == "Pong-v0":
-      self.action_space = [0, 2, 5] # [NONE, UP, DOWN]
+      self.action_space = [1, 2, 3] # [NONE, UP, DOWN]
     elif env_id == "Breakout-v0":
       self.action_space = [1, 2, 3] # [FIRE, RIGHT, LEFT]
     else:
